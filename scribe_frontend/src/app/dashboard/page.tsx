@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useSession, signOut } from "@/lib/auth-client";
 import { useEffect, useState, useRef } from "react";
+import { io as socketIOClient, Socket } from "socket.io-client";
 
 const CHUNK_MS = 20000;
 
@@ -28,6 +29,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string>("");
   const [progress, setProgress] = useState<string>("");
   const [tabFallbackReason, setTabFallbackReason] = useState(""); // Fallback info
+  const [socket, setSocket] = useState<Socket | null>(null);
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -35,7 +37,7 @@ export default function DashboardPage() {
   const recordingRef = useRef<boolean>(false);
   const pauseRef = useRef<boolean>(false);
 
-  
+ 
   const navbarClass = `w-full flex items-center justify-between px-8 py-3 border-b ${
     theme === "dark"
       ? "bg-gray-900 border-gray-800 text-white"
@@ -55,6 +57,46 @@ export default function DashboardPage() {
       ? "font-bold text-lg text-white mb-1"
       : "font-bold text-lg text-gray-900 mb-1";
 
+  -
+  useEffect(() => {
+    const s = socketIOClient("http://localhost:3001");
+    setSocket(s);
+
+    
+    if (sessionId) {
+      s.emit('join_session', sessionId);
+    }
+
+    s.on('transcript_update', ({ sessionId: sid, chunk }) => {
+      if (!sessionId || sid !== sessionId) return;
+      setLiveTranscript((prev) => [...prev, chunk || "[No transcript returned (socket)]"]);
+      setProgress("Transcription received (Socket event)");
+   
+      setError("");
+    });
+    s.on('summary_ready', ({ sessionId: sid, summary: socketSummary }) => {
+      if (!sessionId || sid !== sessionId) return;
+      setSummary(socketSummary || "No summary returned (Socket event)");
+      setProgress("");
+      setSummarizing(false);
+    });
+    s.on('session_error', ({ error }) => {
+      setError("Socket error: " + error);
+      setProgress("");
+    });
+    s.on('session_state', ({ state }) => {
+      if (state === "recording") setProgress("Recording...");
+      if (state === "completed") setProgress("Session completed!");
+      if (state === "paused") setProgress("Paused...");
+      if (state === "processing") setProgress("Processing...");
+    });
+
+    return () => {
+      s.disconnect();
+    };
+    
+  }, [sessionId]);
+
   useEffect(() => {
     if (!isPending && !session?.user) {
       router.push("/sign-in");
@@ -73,7 +115,7 @@ export default function DashboardPage() {
   }, [isPending, session, router]);
 
   const uploadChunkToBackend = async (blob: Blob, sessId: string, retry = 0) => {
-    setProgress(" Sending for transcription...");
+    setProgress("Sending for transcription...");
     if (blob.size < 2048) {
       setProgress("Skipped empty audio chunk.");
       return;
@@ -89,8 +131,9 @@ export default function DashboardPage() {
       });
       if (!res.ok) throw new Error("Network error (status " + res.status + ")");
       const data = await res.json();
-      setLiveTranscript((prev) => [...prev, data.transcript || "[No transcript returned]"]);
-      setProgress("Transcription received.");
+      
+      setLiveTranscript((prev) => [...prev, data.transcript || "[No transcript returned (HTTP)]"]);
+      setProgress("Transcription received (HTTP)");
     } catch (err: any) {
       if (retry < 2) {
         setProgress(`Retrying upload... (${retry + 1})`);
@@ -103,51 +146,50 @@ export default function DashboardPage() {
     }
   };
 
-  const recordChunk = async (stream: MediaStream, sessId: string, fallbackAttempted = false) => {
+  const safeGetUserMedia = async () => {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      setError("Microphone access denied. Please allow mic usage.");
+      throw err;
+    }
+  };
+
+  
+  const recordChunk = async (stream: MediaStream, sessId: string) => {
     if (!recordingRef.current || endedRef.current) return;
     if (recorderRef.current && recorderRef.current.state !== "inactive") return;
     if (pauseRef.current) {
       setProgress("Recording paused.");
       return;
     }
-
     let recorder;
     try {
       recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
       recorderRef.current = recorder;
       setMediaRecorder(recorder);
     } catch (e) {
-      if (inputType === "tab" && !fallbackAttempted) {
-        console.warn("Tab stream failed at MediaRecorder CONSTRUCTOR, switching to mic:", e);
-        setTabFallbackReason("Could not initialize tab recording (MediaRecorder). Switched to mic.");
-        setInputType("mic");
-        setTimeout(() => startRecording("mic", true), 150);
-        return;
-      }
-      setError("Could not start recorder: " );
+      setError("Mic recorder initialization failed.");
       setRecording(false);
       recordingRef.current = false;
       setProgress("");
       return;
     }
-
     recorder.ondataavailable = async (event) => {
       if (endedRef.current || pauseRef.current) return;
       if (event.data.size > 0) {
         await uploadChunkToBackend(event.data, sessId);
       }
       if (recordingRef.current && !endedRef.current && !pauseRef.current) {
-        setTimeout(() => recordChunk(stream, sessId, fallbackAttempted), 0);
+        setTimeout(() => recordChunk(stream, sessId), 0);
       }
     };
-
     recorder.onerror = (e) => {
       setRecording(false);
       recordingRef.current = false;
       setError("MediaRecorder error: " + e.error.name);
       setProgress("");
     };
-
     try {
       recorder.start();
       setError("");
@@ -155,13 +197,6 @@ export default function DashboardPage() {
         if (recorder.state !== "inactive") recorder.stop();
       }, CHUNK_MS);
     } catch (e: any) {
-      if (inputType === "tab" && !fallbackAttempted) {
-        console.warn("Tab stream failed at MediaRecorder START, switching to mic:", e);
-        setTabFallbackReason("Tab recording could not be started. Switched to mic.");
-        setInputType("mic");
-        setTimeout(() => startRecording("mic", true), 150);
-        return;
-      }
       setError("Failed to start MediaRecorder: " + (e?.message || e));
       setRecording(false);
       recordingRef.current = false;
@@ -169,20 +204,8 @@ export default function DashboardPage() {
     }
   };
 
-  const getTabAudioStream = async (): Promise<MediaStream> => {
-    try {
-      return await navigator.mediaDevices.getDisplayMedia({
-        audio: true,
-        video: true,
-      });
-    } catch (err) {
-      setError("Could not capture tab/meeting audio. Tab may be muted, or permission denied.");
-      throw err;
-    }
-  };
-
-  const startRecording = async (overrideType?: "mic" | "tab", fallbackAttempted = false) => {
-    const type = overrideType || inputType;
+  
+  const startRecording = async (forceMic = false) => {
     setRecording(true);
     setPaused(false);
     recordingRef.current = true;
@@ -191,50 +214,72 @@ export default function DashboardPage() {
     setSummary("");
     setError("");
     setProgress("");
-    if (!fallbackAttempted) setTabFallbackReason(""); 
+    setTabFallbackReason("");
     endedRef.current = false;
     const sessId = generateSessionId();
     setSessionId(sessId);
 
     let stream: MediaStream;
-    try {
-      if (type === "mic") {
-        if (fallbackAttempted) {
-          setTabFallbackReason("Fallback to mic: Tab audio failed, now using microphone input.");
-          console.warn("Fallback to mic: starting mic input after tab failure");
-        }
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } else {
-        stream = await getTabAudioStream();
-        const hasAudio = stream.getAudioTracks && stream.getAudioTracks().length > 0;
-        if (!hasAudio) {
-          console.warn("No audio tracks detected on tab stream, switching to mic...");
-          setTabFallbackReason("No audio detected in tab. Switched to mic.");
-          setInputType("mic");
-          setTimeout(() => startRecording("mic", true), 150);
-          stream.getTracks()?.forEach((track) => track.stop());
-          return;
-        }
+    if (forceMic || inputType === "mic") {
+      try {
+        stream = await safeGetUserMedia();
+        if (forceMic) setTabFallbackReason("Tab audio could not be recorded, automatically switched to microphone.");
+        streamRef.current = stream;
+        await recordChunk(stream, sessId);
+      } catch {
+        
       }
-      streamRef.current = stream;
-      await recordChunk(stream, sessId, fallbackAttempted);
-    } catch (error: any) {
-      if (type === "tab" && !fallbackAttempted) {
-        console.error("Tab getDisplayMedia failed, switching to mic!", error);
-        setTabFallbackReason("Tab permission or capture failed. Switched to mic.");
-        setInputType("mic");
-        setTimeout(() => startRecording("mic", true), 150);
+      return;
+    }
+
+   
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        audio: true,
+        video: true,
+      });
+      const hasAudio = stream.getAudioTracks && stream.getAudioTracks().length > 0;
+      if (!hasAudio) {
+        setTabFallbackReason("No tab audio detected, switched to microphone.");
+        stream.getTracks()?.forEach((t) => t.stop());
+        await startRecording(true);
         return;
       }
-      setError(
-        "Error accessing " +
-          (type === "mic" ? "microphone" : "tab audio") +
-          ": " +
-          (error?.message || error)
-      );
-      setRecording(false);
-      recordingRef.current = false;
-      setProgress("");
+      try {
+        const testRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+        let started = false;
+        testRecorder.onstart = () => {
+          started = true;
+          testRecorder.stop();
+        };
+        testRecorder.onstop = async () => {
+          if (started) {
+            streamRef.current = stream;
+            await recordChunk(stream, sessId);
+          } else {
+            setTabFallbackReason("Failed to start recording tab audio, switched to microphone.");
+            stream.getTracks()?.forEach((t) => t.stop());
+            await startRecording(true);
+          }
+        };
+        testRecorder.onerror = async () => {
+          setTabFallbackReason("Tab recording error, switched to microphone.");
+          stream.getTracks()?.forEach((t) => t.stop());
+          await startRecording(true);
+        };
+        testRecorder.start();
+        setTimeout(() => {
+          if (testRecorder.state === "recording") testRecorder.stop();
+        }, 200);
+      } catch (e) {
+        setTabFallbackReason("Tab MediaRecorder failed, switched to microphone.");
+        stream.getTracks()?.forEach((t) => t.stop());
+        await startRecording(true);
+        return;
+      }
+    } catch (e) {
+      setTabFallbackReason("Tab media access denied or failed, switched to microphone.");
+      await startRecording(true);
     }
   };
 
@@ -294,7 +339,7 @@ export default function DashboardPage() {
         body: JSON.stringify({ sessionId }),
       });
       const data = await res.json();
-      setSummary(data.summary || "No summary returned.");
+      setSummary(data.summary || "No summary returned (HTTP)");
       setProgress("");
     } catch (err: any) {
       setSummary("Summarization failed.");
@@ -316,7 +361,7 @@ export default function DashboardPage() {
     <div className={`min-h-screen ${pageBg} transition-all`}>
       {/* Navbar */}
       <nav className={navbarClass}>
-        <div className="text-xl font-bold">ScribeAI </div>
+        <div className="text-xl font-bold">ScribeAI</div>
         <div className="flex gap-2 items-center">
           <button
             onClick={toggleTheme}
@@ -341,7 +386,6 @@ export default function DashboardPage() {
             {tabFallbackReason}
           </div>
         )}
-        {}
         <div className="flex flex-col items-start mt-4">
           <p className={headingClass}>Welcome, {user.name || "User"}!</p>
         </div>
@@ -404,9 +448,7 @@ export default function DashboardPage() {
             Tip: If tab audio cannot be captured, open your meeting/video in a separate window and use the mic option for recording.
           </div>
         )}
-        {}
         <div className="flex flex-col md:flex-row w-full gap-4 mt-6">
-          {}
           <div className="flex-1">
             <h2 className={headingClass}>Live Transcript:</h2>
             <div className={`${panelClass} rounded p-2 min-h-[128px] text-sm whitespace-pre-wrap`}>
@@ -419,7 +461,7 @@ export default function DashboardPage() {
               )}
             </div>
           </div>
-          {/* Summary */}
+          {}
           <div className="flex-1">
             <h2 className={headingClass}>Summary:</h2>
             <div className={`${panelClass} rounded p-2 min-h-[128px] text-sm whitespace-pre-wrap`}>
@@ -433,7 +475,7 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
-        {/* Summarize button (after pause or stop) */}
+        {}
         {canSummarize && (
           <button
             className="bg-yellow-500 px-4 py-2 rounded hover:bg-yellow-600 mt-6 text-black font-semibold"
