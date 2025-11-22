@@ -164,6 +164,15 @@ Focus is on seamless real-time UX, fallback, and AI integration. DB/state/histor
 
 ---
 
+## 🎬 Demo Video
+
+Watch the full walkthrough/demo of ScribeAI running on a local system (all major features shown):
+
+https://youtu.be/La6EMg7BXFw
+
+---
+
+
 ## 👥 Credits, Contact, & Attribution
 
 Built by:  
