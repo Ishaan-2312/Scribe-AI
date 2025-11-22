@@ -170,6 +170,8 @@ Watch the full walkthrough/demo of ScribeAI running on a local system (all major
 
 https://youtu.be/La6EMg7BXFw
 
+** The song in the video has been muted for Copyright Actions and youtube guidelines
+
 ---
 
 
