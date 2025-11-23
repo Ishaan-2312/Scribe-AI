@@ -15,16 +15,16 @@ app.use(cors());
 app.use(express.json());
 const upload = multer({ dest: "tmp/" });
 
-// --- PG Setup ---
+
 const pool = new Pool({
   user: 'postgres',
   host: 'localhost',
-  database: 'scribe_backend', // your db name
+  database: 'scribe_backend', 
   password: process.env.PGPASSWORD ,
   port: 5432,
 });
 
-// --- Gemini ---
+
 const { GoogleGenAI } = require("@google/genai");
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -35,7 +35,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// ---- UPLOAD CHUNK ----
+
 app.post('/upload-chunk', upload.single('audio'), async (req, res) => {
   let webmPath, wavPath;
   try {
@@ -76,19 +76,19 @@ app.post('/upload-chunk', upload.single('audio'), async (req, res) => {
       transcript = response.candidates[0]?.content?.parts?.[0]?.text || "";
     }
 
-    // DB upsert session
+    
     await pool.query(
       'INSERT INTO session (id) VALUES ($1) ON CONFLICT (id) DO NOTHING',
       [sessionId]
     );
-    // Find next chunk index
+    
     const { rows } = await pool.query(
       'SELECT COUNT(*) FROM transcript_chunk WHERE session_id=$1',
       [sessionId]
     );
     const chunkIndex = Number(rows[0].count);
 
-    // Save chunk
+    
     await pool.query(
       'INSERT INTO transcript_chunk (session_id, chunk_index, text) VALUES ($1, $2, $3)',
       [sessionId, chunkIndex, transcript]
@@ -114,7 +114,7 @@ app.post('/upload-chunk', upload.single('audio'), async (req, res) => {
   }
 });
 
-// ---- SUMMARIZE ----
+
 app.post('/summarize', express.json(), async (req, res) => {
   try {
     const { sessionId } = req.body;
@@ -154,7 +154,7 @@ ${fullTranscript}
       summary = response.candidates[0]?.content?.parts?.[0]?.text || "";
     }
 
-    // Save/update summary
+    
     await pool.query(
       `INSERT INTO summary (session_id, summary) VALUES ($1, $2)
        ON CONFLICT (session_id) DO UPDATE SET summary = $2`,
@@ -183,7 +183,7 @@ ${fullTranscript}
   }
 });
 
-// ---- GET ALL SESSIONS (dashboard history) ----
+
 app.get('/sessions', async (req, res) => {
   try {
     const { rows: sessions } = await pool.query(
